@@ -12,6 +12,7 @@
 struct cpuinfo_arm_isa cpuinfo_isa;
 
 static void set_cpuinfo_isa_fields(void);
+static struct woa_chip_info* get_system_info_from_midr(void);
 static struct woa_chip_info* get_system_info_from_registry(void);
 
 static struct woa_chip_info woa_chip_unknown = {
@@ -77,7 +78,10 @@ BOOL CALLBACK cpuinfo_arm_windows_init(PINIT_ONCE init_once, PVOID parameter, PV
 
 	set_cpuinfo_isa_fields();
 
-	chip_info = get_system_info_from_registry();
+	// old way
+	// chip_info = get_system_info_from_registry();
+	chip_info = get_system_info_from_midr();
+
 	if (chip_info == NULL) {
 		chip_info = &woa_chip_unknown;
 	}
@@ -147,6 +151,60 @@ static wchar_t* read_registry(LPCWSTR subkey, LPCWSTR value) {
 		return NULL;
 	}
 	return text_buffer;
+}
+
+static uint64_t read_registry_qword(LPCWSTR subkey, LPCWSTR value) {
+	HKEY hkey = NULL;
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey, 0, KEY_QUERY_VALUE, &hkey) != ERROR_SUCCESS) {
+		cpuinfo_log_error("Registry open key error");
+		return 0;
+	} else {
+		uint64_t value_data = 0;
+		DWORD data_size = sizeof(value_data);
+		LSTATUS result = RegQueryValueExW(hkey, value, NULL, NULL, (LPBYTE)&value_data, &data_size);
+		if (result != ERROR_SUCCESS) {
+			cpuinfo_log_error("Registry read error");
+			value_data = 0;
+		}
+		RegCloseKey(hkey);
+		return value_data;
+	}
+}
+
+static struct woa_chip_info* get_system_info_from_midr(void) {
+	wchar_t* text_buffer = NULL;
+	LPCWSTR cpu0_subkey = L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0";
+	LPCWSTR chip_name_value = L"ProcessorNameString";
+	LPCWSTR chip_midr_value = L"CP 4000";
+	struct woa_chip_info* chip_info = NULL;
+
+	chip_info->chip_name_string = read_registry(cpu0_subkey, chip_name_value);
+	if (chip_info->chip_name_string == NULL) {
+		cpuinfo_log_error("Registry read error");
+		return NULL;
+	}
+	uint32_t midr = (uint32_t)read_registry_qword(cpu0_subkey, chip_midr_value);
+	if (midr == 0) {
+		cpuinfo_log_error("Registry read error, CP 4000 key might not exist?");
+		return NULL;
+	}
+	cpuinfo_arm_decode_vendor_uarch(
+		midr,
+#if CPUINFO_ARCH_ARM
+		false, /* has_vfpv4 */
+#endif
+		&chip_info->uarchs[0].vendor,
+		&chip_info->uarchs[0].uarch);
+	
+	// Get frequency from ~Mhz
+	uint64_t frequency = read_registry_qword(cpu0_subkey, L"~MHz");
+	if (frequency == 0) {
+		cpuinfo_log_error("Registry read error, ~MHz key might not exist?");
+		return NULL;
+	}
+	chip_info->uarchs[0].frequency = frequency * 1000000; // Convert to Hz
+	
+	return chip_info;
 }
 
 static struct woa_chip_info* get_system_info_from_registry(void) {
